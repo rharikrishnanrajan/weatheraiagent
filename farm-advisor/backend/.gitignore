@@ -1,0 +1,23 @@
+# Environments & Secrets
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*secret*
+*credential*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Data & SQLite
+data/*.db
+data/chroma_db/
+*.db
+*.sqlite
+*.sqlite3

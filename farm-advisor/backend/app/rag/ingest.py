@@ -1,0 +1,160 @@
+import os
+import time
+import logging
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pypdf import PdfReader
+from app.config import settings
+from app.rag.vectorstore import get_vectorstore, COLLECTION_NAME
+
+logger = logging.getLogger("farm_advisor.rag.ingest")
+
+def extract_text_from_file(file_path: Path) -> str:
+    """Extract plain text from md, txt, or pdf file."""
+    suffix = file_path.suffix.lower()
+    if suffix in [".md", ".txt"]:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    elif suffix == ".pdf":
+        reader = PdfReader(str(file_path))
+        text_parts = []
+        for i, page in enumerate(reader.pages):
+            p_text = page.extract_text()
+            if p_text:
+                text_parts.append(p_text)
+        return "\n\n".join(text_parts)
+    else:
+        logger.warning("Unsupported file type: %s", suffix)
+        return ""
+
+def infer_crops_and_category(filename: str, content: str) -> tuple[str, str]:
+    """Infer relevant crops and domain category from filename and content."""
+    crops = []
+    known_crops = ["tomato", "corn", "maize", "wheat", "rice", "potato", "soybean", "cotton", "onion"]
+    lower_content = (filename + " " + content[:1000]).lower()
+    for c in known_crops:
+        if c in lower_content:
+            crops.append(c.capitalize())
+            
+    crop_str = ", ".join(crops) if crops else "General Agriculture"
+    
+    # Inferred category
+    fname_lower = filename.lower()
+    if "irrigation" in fname_lower or "water" in fname_lower:
+        category = "Irrigation & Water"
+    elif "pest" in fname_lower or "disease" in fname_lower or "fungal" in fname_lower:
+        category = "Pest & Disease Control"
+    elif "fertilizer" in fname_lower or "nutrient" in fname_lower:
+        category = "Soil & Fertilizer"
+    elif "frost" in fname_lower or "heat" in fname_lower or "weather" in fname_lower:
+        category = "Weather Protection"
+    elif "sowing" in fname_lower or "calendar" in fname_lower or "planting" in fname_lower:
+        category = "Sowing & Planting"
+    else:
+        category = "Agronomic Advisory"
+        
+    return crop_str, category
+
+def ingest_documents(kb_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Ingest all knowledge base documents into Chroma vector store with chunking and rate-limit safety."""
+    target_dir = Path(kb_dir or settings.KNOWLEDGE_BASE_DIR)
+    if not target_dir.exists():
+        logger.warning("Knowledge base directory does not exist: %s", target_dir)
+        return {"status": "error", "message": f"Directory not found: {target_dir}"}
+        
+    files = list(target_dir.glob("*.md")) + list(target_dir.glob("*.txt")) + list(target_dir.glob("*.pdf"))
+    if not files:
+        logger.info("No documents found to ingest in %s", target_dir)
+        return {"status": "no_files", "documents_processed": 0, "chunks_created": 0}
+        
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=700,
+        chunk_overlap=90,
+        separators=["\n## ", "\n### ", "\n\n", "\n", ". ", " "]
+    )
+    
+    docs_to_add: List[Document] = []
+    processed_count = 0
+    
+    for f in files:
+        content = extract_text_from_file(f)
+        if not content.strip():
+            continue
+            
+        crops, category = infer_crops_and_category(f.name, content)
+        chunks = text_splitter.split_text(content)
+        
+        for idx, chunk in enumerate(chunks):
+            doc = Document(
+                page_content=chunk,
+                metadata={
+                    "source": f.name,
+                    "title": f.stem.replace("_", " ").title(),
+                    "category": category,
+                    "crop": crops,
+                    "chunk_id": f"{f.stem}_{idx}"
+                }
+            )
+            docs_to_add.append(doc)
+        processed_count += 1
+
+    if not docs_to_add:
+        return {"status": "success", "documents_processed": 0, "chunks_created": 0}
+
+    vectorstore = get_vectorstore()
+    
+    # Batch ingestion to handle potential API rate limits gracefully
+    batch_size = 20
+    for i in range(0, len(docs_to_add), batch_size):
+        batch = docs_to_add[i : i + batch_size]
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                vectorstore.add_documents(batch)
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate limit" in err_str:
+                    logger.warning("Rate limit hit during vectorstore ingestion, backing off for 3 seconds...")
+                    time.sleep(3.0 * (attempt + 1))
+                else:
+                    if attempt == max_retries - 1:
+                        logger.error("Failed adding batch to vectorstore: %s", e)
+                        raise
+                    time.sleep(1.0)
+                    
+    logger.info("Ingestion completed: %d documents, %d chunks into collection %s",
+                processed_count, len(docs_to_add), COLLECTION_NAME)
+                
+    return {
+        "status": "success",
+        "documents_processed": processed_count,
+        "chunks_created": len(docs_to_add),
+        "collection_name": COLLECTION_NAME
+    }
+
+def list_kb_documents(kb_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List documents in the knowledge base directory with summary details."""
+    target_dir = Path(kb_dir or settings.KNOWLEDGE_BASE_DIR)
+    if not target_dir.exists():
+        return []
+        
+    results = []
+    files = list(target_dir.glob("*.md")) + list(target_dir.glob("*.txt")) + list(target_dir.glob("*.pdf"))
+    for f in files:
+        stat = f.stat()
+        content = extract_text_from_file(f)
+        crops, category = infer_crops_and_category(f.name, content)
+        results.append({
+            "id": f.name,
+            "filename": f.name,
+            "title": f.stem.replace("_", " ").title(),
+            "category": category,
+            "crops": [c.strip() for c in crops.split(",") if c.strip()],
+            "size_bytes": stat.st_size,
+            "chunk_count": max(1, len(content) // 600),
+            "created_at": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime))
+        })
+    return sorted(results, key=lambda x: x["filename"])

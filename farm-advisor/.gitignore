@@ -1,0 +1,44 @@
+# Environments & Secrets
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.pkcs12
+*.pfx
+*.p12
+*secret*
+*credential*
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Databases & Vector Stores
+*.db
+*.sqlite
+*.sqlite3
+backend/data/*.db
+backend/data/chroma_db/
+data/chroma_db/
+data/*.db
+
+# Frontend / Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor & OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
