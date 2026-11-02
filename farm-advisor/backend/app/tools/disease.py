@@ -7,6 +7,12 @@
 #    (prolonged leaf wetness, high relative humidity, optimal incubation temperatures).
 # 3. Outputs risk score (0-100), severity tier (LOW, MODERATE, HIGH, CRITICAL),
 #    visible diagnostic symptoms, and practical prevention steps.
+#
+# BEGINNER TIP: Fungal diseases need three things to take off:
+#   1. The right temperature (each fungus has an optimal range)
+#   2. High humidity (spores need moisture to germinate on leaves)
+#   3. Leaf wetness duration (spores need time to infect the plant)
+# This tool calculates how many of these three conditions are currently being met.
 # ==============================================================================
 
 import logging
@@ -15,23 +21,35 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger("farm_advisor.tools.disease")
 
-# Biological environmental parameters for common crop pathogens
+# ==============================================================================
+# DISEASE MODEL LIBRARY
+# ==============================================================================
+# Each entry describes the environmental requirements for a specific pathogen:
+#   - optimal_temp_range: (min_°C, max_°C) – ideal infection temperature window
+#   - min_rh: Minimum relative humidity % for spore germination
+#   - min_wetness_hours: Hours of leaf wetness needed for successful infection
+#   - severity_weight: Multiplier for how destructive this disease is (0.5 – 1.0)
+#   - symptoms: Visual signs farmers should look for in the field
+#   - prevention: Recommended cultural or chemical control measures
 DISEASE_MODELS = {
+    # ---------------------------------------------------
+    # TOMATO DISEASES
+    # ---------------------------------------------------
     "tomato": [
         {
             "name": "Late Blight (Phytophthora infestans)",
             "pathogen": "Oomycete Fungus",
-            "optimal_temp_range": (12.0, 22.0),
-            "min_rh": 85.0,
-            "min_wetness_hours": 6.0,
-            "severity_weight": 1.0,
+            "optimal_temp_range": (12.0, 22.0),   # Thrives in cool, wet weather
+            "min_rh": 85.0,                        # Needs very high humidity
+            "min_wetness_hours": 6.0,              # 6+ hours wet leaf to infect
+            "severity_weight": 1.0,                # Highly destructive – can wipe out a field
             "symptoms": "Water-soaked dark lesions on leaves/stems with white fuzzy sporulation on leaf undersides in humid conditions.",
             "prevention": "Ensure good spacing; avoid overhead irrigation. Apply copper hydroxide or bio-fungicide (Bacillus subtilis) preventively before rain events."
         },
         {
             "name": "Early Blight (Alternaria solani)",
             "pathogen": "Fungus",
-            "optimal_temp_range": (20.0, 29.0),
+            "optimal_temp_range": (20.0, 29.0),   # Warm, humid nights ideal
             "min_rh": 75.0,
             "min_wetness_hours": 4.0,
             "severity_weight": 0.8,
@@ -41,7 +59,7 @@ DISEASE_MODELS = {
         {
             "name": "Bacterial Spot (Xanthomonas)",
             "pathogen": "Bacteria",
-            "optimal_temp_range": (24.0, 30.0),
+            "optimal_temp_range": (24.0, 30.0),   # Prefers warm temperatures
             "min_rh": 80.0,
             "min_wetness_hours": 5.0,
             "severity_weight": 0.75,
@@ -49,6 +67,9 @@ DISEASE_MODELS = {
             "prevention": "Do not work in wet fields. Use certified disease-free seeds; copper sprays with mancozeb tank mix if permitted."
         }
     ],
+    # ---------------------------------------------------
+    # CORN / MAIZE DISEASES
+    # ---------------------------------------------------
     "corn": [
         {
             "name": "Northern Corn Leaf Blight (Exserohilum turcicum)",
@@ -63,19 +84,22 @@ DISEASE_MODELS = {
         {
             "name": "Gray Leaf Spot (Cercospora zeae-maydis)",
             "pathogen": "Fungus",
-            "optimal_temp_range": (25.0, 32.0),
+            "optimal_temp_range": (25.0, 32.0),   # Thrives in warm, humid conditions
             "min_rh": 88.0,
-            "min_wetness_hours": 8.0,
+            "min_wetness_hours": 8.0,              # Needs extended leaf wetness
             "severity_weight": 0.9,
             "symptoms": "Rectangular, blocky lesions restricted between leaf veins.",
             "prevention": "Crop rotation with non-host (soybeans); select hybrids with high tolerance scores."
         }
     ],
+    # ---------------------------------------------------
+    # WHEAT DISEASES
+    # ---------------------------------------------------
     "wheat": [
         {
             "name": "Stripe / Yellow Rust (Puccinia striiformis)",
             "pathogen": "Fungus",
-            "optimal_temp_range": (10.0, 16.0),
+            "optimal_temp_range": (10.0, 16.0),   # Unique: prefers COOL weather
             "min_rh": 80.0,
             "min_wetness_hours": 4.0,
             "severity_weight": 0.95,
@@ -87,27 +111,30 @@ DISEASE_MODELS = {
             "pathogen": "Fungus",
             "optimal_temp_range": (22.0, 29.0),
             "min_rh": 85.0,
-            "min_wetness_hours": 12.0,
-            "severity_weight": 1.0,
+            "min_wetness_hours": 12.0,             # Needs prolonged wetness during flowering
+            "severity_weight": 1.0,                # Produces mycotoxins – grain quality risk
             "symptoms": "Bleached spikelets on heads during flowering, pinkish spore masses at spikelet base.",
             "prevention": "Avoid following corn with wheat; apply targeted fungicide (e.g. prothioconazole) at early anthesis."
         }
     ],
+    # ---------------------------------------------------
+    # POTATO DISEASES
+    # ---------------------------------------------------
     "potato": [
         {
             "name": "Potato Late Blight",
             "pathogen": "Oomycete Fungus",
             "optimal_temp_range": (10.0, 21.0),
-            "min_rh": 90.0,
+            "min_rh": 90.0,                        # Very high humidity required
             "min_wetness_hours": 6.0,
-            "severity_weight": 1.0,
+            "severity_weight": 1.0,                # The disease that caused the Irish famine
             "symptoms": "Irregular brownish lesions with pale halos; decaying tubers smell pungent.",
             "prevention": "Destroy cull piles; apply systemic/protectant fungicides on Smith Period alert."
         }
     ]
 }
 
-# Fallback generic foliar disease model for unspecified crops
+# Generic disease models for crops not listed in the specific table above
 GENERIC_DISEASE_MODELS = [
     {
         "name": "Foliar Fungal Leaf Spot / Blight Complex",
@@ -123,7 +150,7 @@ GENERIC_DISEASE_MODELS = [
         "name": "Powdery Mildew",
         "pathogen": "Fungus",
         "optimal_temp_range": (15.0, 26.0),
-        "min_rh": 65.0,
+        "min_rh": 65.0,                    # Unusual: can thrive at LOWER humidity than most fungi
         "min_wetness_hours": 2.0,
         "severity_weight": 0.6,
         "symptoms": "White talcum powder-like fungal patches on upper leaf surfaces and young shoots.",
@@ -132,6 +159,9 @@ GENERIC_DISEASE_MODELS = [
 ]
 
 
+# ==============================================================================
+# AGENT TOOL: disease_risk_estimator
+# ==============================================================================
 @tool
 def disease_risk_estimator(
     crop: str,
@@ -139,37 +169,50 @@ def disease_risk_estimator(
     current_humidity_pct: float = 65.0
 ) -> Dict[str, Any]:
     """Estimate fungal and pest pathogen outbreak risk based on weather forecast conditions.
-    
+
     Args:
         crop: Crop name (e.g., 'Tomato', 'Corn', 'Wheat', 'Potato').
-        forecast_hours: List of hourly forecast dicts with 'temperature_2m', 'relative_humidity_2m', 'precipitation'.
+        forecast_hours: List of hourly forecast dicts with
+            'temperature_2m', 'relative_humidity_2m', 'precipitation'.
         current_humidity_pct: Current relative humidity percentage.
     """
     crop_lower = crop.lower().strip()
+    # Select the appropriate disease models for this crop (or use generic fallback)
     models = DISEASE_MODELS.get(crop_lower, GENERIC_DISEASE_MODELS)
-    
-    # Calculate environmental statistics over next 48 hours
+
+    # Limit analysis to the next 48 hours for tractable disease window modeling
     analyzed_hours = forecast_hours[:48] if forecast_hours else []
-    
+
+    # ------------------------------------------------------------------
+    # EXTRACT WEATHER STATISTICS FROM HOURLY DATA
+    # ------------------------------------------------------------------
     if not analyzed_hours:
-        # Fallback evaluation based on current conditions
-        temp = 20.0
-        humidity = current_humidity_pct
+        # No hourly data provided – use rough estimate from current humidity
+        avg_temp = 20.0
+        avg_humid = current_humidity_pct
         rain_hours = 0
         consecutive_wet_hours = 0
     else:
+        # Build arrays of temps, humidities, and precipitation values
         temps = [float(h.get("temperature_2m", 20.0)) for h in analyzed_hours]
         humids = [float(h.get("relative_humidity_2m", 60.0)) for h in analyzed_hours]
         rains = [float(h.get("precipitation", 0.0)) for h in analyzed_hours]
-        
+
         avg_temp = sum(temps) / len(temps)
         avg_humid = sum(humids) / len(humids)
+
+        # Count hours where rain was observed (threshold 0.1 mm = measurable rain)
         rain_hours = sum(1 for r in rains if r > 0.1)
-        
-        # Estimate leaf wetness duration: hours where rain > 0 or RH > 88%
-        wet_hours = sum(1 for h in analyzed_hours if float(h.get("precipitation", 0.0)) > 0.05 or float(h.get("relative_humidity_2m", 0.0)) >= 88.0)
-        
-        # Calculate max consecutive humid/wet hours
+
+        # Leaf wetness = hours where it rained OR humidity was very high (≥ 88%)
+        # (High humidity alone keeps dew on leaves without needing actual rain)
+        wet_hours = sum(
+            1 for h in analyzed_hours
+            if float(h.get("precipitation", 0.0)) > 0.05 or float(h.get("relative_humidity_2m", 0.0)) >= 88.0
+        )
+
+        # Find the longest consecutive run of wet/humid hours
+        # (fungal infection requires SUSTAINED wetness, not just occasional drops)
         consecutive_wet_hours = 0
         current_run = 0
         for h in analyzed_hours:
@@ -177,39 +220,46 @@ def disease_risk_estimator(
                 current_run += 1
                 consecutive_wet_hours = max(consecutive_wet_hours, current_run)
             else:
-                current_run = 0
+                current_run = 0  # Reset counter when conditions break
 
+    # ------------------------------------------------------------------
+    # EVALUATE EACH DISEASE MODEL AGAINST THE WEATHER DATA
+    # ------------------------------------------------------------------
     evaluated_diseases = []
     max_risk_score = 0
-    
+
     for dis in models:
         min_temp, max_temp = dis["optimal_temp_range"]
         target_rh = dis["min_rh"]
         target_wet = dis["min_wetness_hours"]
-        
-        # Temperature suitability factor (0.0 to 1.0)
-        temp_factor = 0.0
+
+        # --- Temperature Suitability Factor (0.0 = unsuitable, 1.0 = perfect) ---
+        # Measures: "What fraction of the 24-hour period had favorable temperatures?"
         if analyzed_hours:
             favorable_temp_hours = sum(1 for t in temps if min_temp <= t <= max_temp)
             temp_factor = min(1.0, favorable_temp_hours / 24.0)
         else:
-            temp_factor = 0.5
-            
-        # Humidity suitability factor (0.0 to 1.0)
-        humid_factor = 0.0
+            temp_factor = 0.5  # Default 50% when no data
+
+        # --- Humidity Suitability Factor (0.0 – 1.0) ---
+        # Measures: "How many hours exceeded the minimum humidity for spore germination?"
         if analyzed_hours:
             favorable_humid_hours = sum(1 for h in humids if h >= target_rh)
-            humid_factor = min(1.0, favorable_humid_hours / 18.0)
+            humid_factor = min(1.0, favorable_humid_hours / 18.0)  # 18h is a full night
         else:
             humid_factor = 0.6 if current_humidity_pct >= target_rh else 0.2
-            
-        # Leaf wetness duration factor (0.0 to 1.0)
+
+        # --- Leaf Wetness Duration Factor (0.0 – 1.0) ---
+        # Measures: "Did consecutive wet hours meet the minimum infection period?"
         wet_factor = min(1.0, consecutive_wet_hours / max(1.0, target_wet))
-        
-        # Calculate composite pathogen development score (0 - 100)
+
+        # --- Composite Risk Score (0 – 100) ---
+        # Weighted average: temperature (35%) + humidity (35%) + wetness (30%)
+        # Multiplied by the disease's severity weight to amplify destructive pathogens
         raw_score = (temp_factor * 0.35 + humid_factor * 0.35 + wet_factor * 0.30) * 100 * dis["severity_weight"]
-        score = min(100, max(5, int(raw_score)))
-        
+        score = min(100, max(5, int(raw_score)))   # Clamp to 5-100 range
+
+        # Assign a human-readable risk tier
         risk_level = "LOW"
         if score >= 75:
             risk_level = "HIGH / CRITICAL"
@@ -217,9 +267,9 @@ def disease_risk_estimator(
             risk_level = "MODERATE"
         elif score >= 30:
             risk_level = "GUARDED"
-            
-        max_risk_score = max(max_risk_score, score)
-        
+
+        max_risk_score = max(max_risk_score, score)   # Track the highest score across all diseases
+
         evaluated_diseases.append({
             "disease_name": dis["name"],
             "pathogen_type": dis["pathogen"],
@@ -228,10 +278,12 @@ def disease_risk_estimator(
             "symptoms": dis["symptoms"],
             "prevention_strategy": dis["prevention"]
         })
-        
+
+    # Sort diseases from highest to lowest risk so the most urgent appears first
     evaluated_diseases.sort(key=lambda x: x["risk_score"], reverse=True)
     top_disease = evaluated_diseases[0] if evaluated_diseases else None
-    
+
+    # Determine the overall risk level based on the highest individual disease score
     overall_level = "LOW"
     if max_risk_score >= 75:
         overall_level = "HIGH / CRITICAL"
@@ -240,6 +292,7 @@ def disease_risk_estimator(
     elif max_risk_score >= 30:
         overall_level = "GUARDED"
 
+    # Build a one-sentence executive summary
     summary = (
         f"Overall pathogen risk for {crop.capitalize()} is rated {overall_level} (Score {max_risk_score}/100). "
         f"Primary threat to monitor: {top_disease['disease_name']} ({top_disease['risk_level']})."
@@ -251,8 +304,8 @@ def disease_risk_estimator(
         "overall_risk_level": overall_level,
         "overall_risk_score": max_risk_score,
         "summary": summary,
-        "consecutive_wet_hours": consecutive_wet_hours,
+        "consecutive_wet_hours": consecutive_wet_hours,   # Key infection indicator
         "rain_hours_next_48h": rain_hours if analyzed_hours else 0,
-        "diseases": evaluated_diseases,
+        "diseases": evaluated_diseases,                   # Full breakdown per pathogen
         "source": "pest_and_fungal_disease_guide.md"
     }
