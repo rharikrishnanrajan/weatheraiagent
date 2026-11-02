@@ -1,9 +1,20 @@
+# ==============================================================================
+# AgriPulse: Irrigation Advisor Tool (FAO-56 Evapotranspiration Model)
+# ==============================================================================
+# WHAT THIS FILE DOES:
+# 1. Calculates daily crop water loss (ETc = ET0 * Kc) according to UN FAO-56 standards.
+# 2. Factors in soil holding capacity (Sandy, Loamy, Clay) to prevent under/over-watering.
+# 3. Analyzes upcoming 3-day rainfall to advise whether to IRRIGATE, REDUCE, or HOLD.
+# ==============================================================================
+
 import logging
 from typing import Dict, Any
 from langchain_core.tools import tool
 
 logger = logging.getLogger("farm_advisor.tools.irrigation")
 
+# Crop coefficient (Kc) lookup table across different growth stages
+# Kc represents how much water a specific crop uses compared to grass reference ET0
 CROP_KC_TABLE = {
     "tomato": {"initial": 0.45, "vegetative": 0.75, "flowering": 1.15, "fruiting": 1.15, "ripening": 0.80},
     "corn": {"initial": 0.40, "vegetative": 0.80, "silking": 1.20, "flowering": 1.20, "maturity": 0.60},
@@ -16,8 +27,10 @@ CROP_KC_TABLE = {
     "onion": {"initial": 0.40, "vegetative": 0.70, "bulb_enlargement": 1.05, "maturity": 0.75},
 }
 
+# Fallback crop coefficient if a crop is not in the dictionary
 DEFAULT_KC = {"initial": 0.45, "vegetative": 0.75, "flowering": 1.10, "reproductive": 1.10, "maturity": 0.65}
 
+# Physical water-holding and infiltration attributes per soil type
 SOIL_CHARACTERISTICS = {
     "sandy": {
         "holding_capacity": "Low (25-35 mm/m)",
@@ -45,6 +58,7 @@ SOIL_CHARACTERISTICS = {
     }
 }
 
+
 @tool
 def irrigation_advisor(
     crop: str,
@@ -68,7 +82,7 @@ def irrigation_advisor(
     stage_lower = growth_stage.lower().strip()
     soil_lower = soil_type.lower().strip()
     
-    # 1. Determine Kc factor
+    # Step 1: Look up crop coefficient factor (Kc)
     crop_table = CROP_KC_TABLE.get(crop_lower, DEFAULT_KC)
     kc = crop_table.get(stage_lower)
     if kc is None:
@@ -78,50 +92,65 @@ def irrigation_advisor(
                 kc = crop_table[key]
                 break
     if kc is None:
-        kc = 0.85 # default moderate Kc
+        kc = 0.85  # General mid-season average fallback
         
-    # 2. Daily and 3-day evapotranspiration (ETc)
-    daily_etc = round(et0_mm * kc, 2)
-    period_days = 3
-    total_water_demand = round(daily_etc * period_days, 2)
+    # Step 2: Compute daily crop water demand (ETc = ET0 * Kc)
+    daily_crop_water_loss = round(et0_mm * kc, 2)
+    three_day_demand = round(daily_crop_water_loss * 3.0, 2)
     
-    # 3. Effective precipitation credit (approx 75% of forecast rain, 60% of recent rain)
-    effective_rain = (forecast_rain_mm * 0.75) + (recent_rain_mm * 0.60)
-    net_irrigation_needed = max(0.0, round(total_water_demand - effective_rain, 1))
+    # Step 3: Compute net water deficit accounting for effective rainfall
+    effective_forecast_rain = forecast_rain_mm * 0.8  # Assume 80% effective infiltration
+    effective_recent_rain = recent_rain_mm * 0.7
     
-    # 4. Soil recommendations
+    net_water_deficit = round(three_day_demand - effective_forecast_rain - effective_recent_rain, 2)
+    
+    # Step 4: Soil characteristics
     soil_info = SOIL_CHARACTERISTICS.get(soil_lower, SOIL_CHARACTERISTICS["loamy"])
+    base_dose = soil_info["recommended_dose_mm"]
     
-    # 5. Decision recommendation
+    # Step 5: Formulate actionable agronomic recommendation
     if forecast_rain_mm >= 15.0:
-        recommendation = "HOLD IRRIGATION"
-        reason = f"Upcoming forecast predicts {forecast_rain_mm} mm of rain, which will sufficiently replenish root zone moisture without irrigation."
-        suggested_mm = 0.0
-    elif net_irrigation_needed <= 3.0:
-        recommendation = "DELAY / OPTIONAL"
-        reason = f"Soil moisture and minor rainfall satisfy crop demand ({total_water_demand} mm needed vs {effective_rain:.1f} mm effective rain). Inspect field moisture before watering."
-        suggested_mm = 0.0
+        action = "HOLD_IRRIGATION"
+        recommendation = (
+            f"HOLD IRRIGATION. Significant rainfall ({forecast_rain_mm:.1f} mm) is forecasted within 72 hours. "
+            f"Anticipated rain exceeds 3-day crop demand ({three_day_demand:.1f} mm). "
+            f"Hold off to prevent waterlogging, nutrient leaching, and root hypoxia."
+        )
+        water_amount_mm = 0.0
+    elif net_water_deficit <= 2.0:
+        action = "DELAY_OR_LIGHT"
+        recommendation = (
+            f"DELAY OR LIGHT CYCLE. Light rain or residual soil moisture covers current demand. "
+            f"Net deficit is only {net_water_deficit:.1f} mm. Monitor topsoil before irrigating."
+        )
+        water_amount_mm = 0.0
+    elif net_water_deficit > base_dose:
+        action = "IRRIGATE_FULL"
+        water_amount_mm = min(net_water_deficit, base_dose * 1.3)
+        recommendation = (
+            f"IRRIGATE. Cumulative crop evapotranspiration ({three_day_demand:.1f} mm) is outpacing rainfall. "
+            f"Apply approximately {water_amount_mm:.1f} mm over {soil_info['frequency']} to replenish root zone field capacity."
+        )
     else:
-        recommendation = "IRRIGATE"
-        # Dose capped by soil holding capacity
-        suggested_mm = min(net_irrigation_needed, soil_info["recommended_dose_mm"])
-        reason = f"Crop evapotranspiration ({total_water_demand} mm over 3 days) exceeds effective rainfall ({effective_rain:.1f} mm). Deficit of {net_irrigation_needed} mm should be replenished."
-
-    m3_per_hectare = round(suggested_mm * 10, 1) # 1 mm = 10 m3/ha
-    
+        action = "IRRIGATE_MAINTENANCE"
+        water_amount_mm = net_water_deficit
+        recommendation = (
+            f"APPLY MAINTENANCE IRRIGATION. Supply {water_amount_mm:.1f} mm to keep soil moisture within optimal tension."
+        )
+        
     return {
-        "crop": crop,
+        "crop": crop.capitalize(),
         "growth_stage": growth_stage,
-        "soil_type": soil_type,
-        "crop_coefficient_kc": kc,
-        "daily_crop_et_mm": daily_etc,
-        "three_day_demand_mm": total_water_demand,
-        "effective_rain_mm": round(effective_rain, 1),
-        "net_deficit_mm": net_irrigation_needed,
-        "action": recommendation,
-        "suggested_application_depth_mm": suggested_mm,
-        "water_volume_m3_per_hectare": m3_per_hectare,
-        "best_timing": "Early morning (6:00 AM - 9:00 AM) or dusk to minimize evaporative loss",
-        "soil_advice": f"{soil_info['frequency']}. {soil_info['note']}",
-        "explanation": reason
+        "soil_type": soil_type.capitalize(),
+        "kc_factor": kc,
+        "reference_et0_mm_day": et0_mm,
+        "daily_crop_water_loss_mm": daily_crop_water_loss,
+        "three_day_crop_demand_mm": three_day_demand,
+        "forecast_rain_3d_mm": forecast_rain_mm,
+        "net_deficit_mm": max(0.0, net_water_deficit),
+        "action": action,
+        "recommended_dose_mm": round(water_amount_mm, 1),
+        "soil_notes": soil_info["note"],
+        "recommendation": recommendation,
+        "source": "irrigation_management_guide.md"
     }

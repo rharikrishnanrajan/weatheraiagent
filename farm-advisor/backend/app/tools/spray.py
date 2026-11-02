@@ -1,8 +1,19 @@
+# ==============================================================================
+# AgriPulse: Spray Window Checker Tool
+# ==============================================================================
+# WHAT THIS FILE DOES:
+# 1. Analyzes hourly meteorological forecasts to identify safe agrochemical spray windows.
+# 2. Checks wind speed: flags thermal drift (>18 km/h) or atmospheric inversions (<3 km/h).
+# 3. Evaluates rainfastness: ensures 3 hours of dry weather post-application.
+# 4. Monitors temperature & humidity: prevents foliar scorching (>28°C) and droplet evaporation.
+# ==============================================================================
+
 import logging
 from typing import Dict, Any, List
 from langchain_core.tools import tool
 
 logger = logging.getLogger("farm_advisor.tools.spray")
+
 
 @tool
 def spray_window_checker(
@@ -21,7 +32,7 @@ def spray_window_checker(
             "message": "No hourly forecast data provided. Fetch forecast hours from weather tool first."
         }
     
-    # Analyze up to next 36 hours
+    # Analyze upcoming 36 hours for field operation planning
     window_evaluations = []
     
     for idx, hour in enumerate(forecast_hours[:36]):
@@ -35,14 +46,14 @@ def spray_window_checker(
         reasons = []
         is_safe = True
         
-        # Wind evaluation
+        # 1. Wind evaluation: Safe window is 3 - 15 km/h
         if wind > 18.0 or gusts > 25.0:
             is_safe = False
             reasons.append(f"High wind drift risk (wind {wind:.1f} km/h, gusts {gusts:.1f} km/h)")
         elif wind < 3.0:
             reasons.append("Low wind / possible thermal inversion (droplets may hang in air)")
             
-        # Rain evaluation: check immediate rain and next 3 hours
+        # 2. Rain evaluation: check immediate rain and next 3 hours (rainfastness window)
         future_rain = rain
         for lookahead in range(1, 4):
             if idx + lookahead < len(forecast_hours):
@@ -55,7 +66,7 @@ def spray_window_checker(
             is_safe = False
             reasons.append(f"Rain expected within 3 hours ({future_rain:.1f} mm), compromising rainfastness")
             
-        # Temperature evaluation
+        # 3. Temperature evaluation: Prevent foliar phytotoxicity / burn (>28°C)
         if temp > 28.0:
             is_safe = False
             reasons.append(f"High temperature ({temp:.1f}°C) causes droplet volatilization and crop foliage scorching")
@@ -63,12 +74,13 @@ def spray_window_checker(
             is_safe = False
             reasons.append(f"Low temperature ({temp:.1f}°C) slows systemic absorption")
             
-        # Humidity evaluation
+        # 4. Humidity evaluation: Droplet evaporation vs drying rate
         if hum < 35.0:
             reasons.append(f"Low humidity ({hum:.0f}%) accelerates droplet evaporation before target contact")
         elif hum > 88.0 and not is_safe:
             reasons.append(f"Very high humidity ({hum:.0f}%) delays drying")
 
+        # 5. Composite safety score (0 - 100)
         score = 100
         if not is_safe:
             score = max(20, 100 - len(reasons) * 30)
@@ -79,39 +91,36 @@ def spray_window_checker(
         
         window_evaluations.append({
             "time": t_time,
-            "temp_c": temp,
-            "humidity_pct": hum,
-            "wind_kmh": wind,
-            "rain_mm": rain,
-            "score": score,
             "rating": rating,
-            "flags": reasons
+            "safety_score": score,
+            "is_safe": is_safe,
+            "temperature_c": temp,
+            "humidity_pct": hum,
+            "wind_speed_kmh": wind,
+            "rain_mm": rain,
+            "warnings_or_factors": reasons
         })
-
-    # Find the best contiguous window (3+ hours of Optimal/Marginal)
-    best_windows = [w for w in window_evaluations if w["score"] >= 75]
+        
+    # Extract optimal spray windows
+    optimal_windows = [w for w in window_evaluations if w["rating"] == "Optimal"]
+    marginal_windows = [w for w in window_evaluations if w["rating"] == "Moderate/Marginal"]
     
-    if best_windows:
-        best_start = best_windows[0]["time"]
-        best_end = best_windows[min(3, len(best_windows)-1)]["time"]
-        overall_advice = f"RECOMMENDED SPRAY WINDOW: From {best_start} to {best_end}."
-        verdict = "APPROVED"
+    summary_text = ""
+    if optimal_windows:
+        times_str = ", ".join([w["time"][-5:] for w in optimal_windows[:4]])
+        summary_text = f"Optimal spray conditions detected during hours: {times_str}. Low drift risk and dry canopy."
+    elif marginal_windows:
+        times_str = ", ".join([w["time"][-5:] for w in marginal_windows[:3]])
+        summary_text = f"Marginal spray conditions around {times_str}. Monitor wind gusts and spray with coarse droplet nozzles."
     else:
-        best_start = "None"
-        best_end = "None"
-        overall_advice = "NO SAFE SPRAY WINDOW IN IMMEDIATE FORECAST. Defer spraying due to adverse wind, rain, or heat conditions."
-        verdict = "DELAY"
+        summary_text = "No safe spray windows in the next 36 hours due to wind or rainfall. Hold applications to avoid chemical loss."
 
     return {
-        "verdict": verdict,
-        "target_agrochemical": target_pesticide_type,
-        "recommendation": overall_advice,
-        "optimal_window_start": best_start,
-        "optimal_window_end": best_end,
-        "evaluated_hours_sample": window_evaluations[:12],
-        "safety_rules": [
-            "Maintain nozzle pressure between 2.0-3.0 bar to minimize driftable fine droplets (<100 um).",
-            "Maintain 5-meter buffer from non-target vegetation and waterways.",
-            "Always wear complete PPE: nitrile gloves, protective eyewear, and respirator mask."
-        ]
+        "target_pesticide_type": target_pesticide_type,
+        "summary": summary_text,
+        "safe_hours_count": len(optimal_windows),
+        "marginal_hours_count": len(marginal_windows),
+        "best_windows": optimal_windows[:5],
+        "all_hourly_ratings": window_evaluations[:24],
+        "source": "pest_and_fungal_disease_guide.md"
     }

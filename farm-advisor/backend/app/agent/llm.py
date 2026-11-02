@@ -1,12 +1,12 @@
-import logging
-from typing import Any, List, Optional, Iterator, AsyncIterator
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
-from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChunk
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from app.config import settings
-
-logger = logging.getLogger("farm_advisor.agent.llm")
+# ==============================================================================
+# AgriPulse: LLM Provider, NVIDIA NIM Client & Offline Fallback Model
+# ==============================================================================
+# WHAT THIS FILE DOES:
+# 1. Connects to the NVIDIA AI Endpoints (NVIDIA NIM) for Meta LLaMA 3.3 70B inference.
+# 2. Provides a zero-dependency fallback model (`FallbackAgriChatModel`) so that
+#    beginners can run the application immediately even without an NVIDIA API Key!
+# 3. Tests tool-calling capabilities at startup and reports system health status.
+# ==============================================================================
 
 import logging
 from typing import Any, List, Optional, Iterator, AsyncIterator, Sequence
@@ -18,14 +18,22 @@ from app.config import settings
 
 logger = logging.getLogger("farm_advisor.agent.llm")
 
+
+# ==============================================================================
+# FALLBACK OFFLINE MODEL (Allows testing without an API key)
+# ==============================================================================
 class FallbackAgriChatModel(BaseChatModel):
-    """Fallback conversational model used when NVIDIA_API_KEY is not configured or in offline mode.
+    """
+    Fallback conversational model used when NVIDIA_API_KEY is not configured or in offline mode.
     Generates structured agronomic advice based on retrieved data without crashing the application.
     """
     model_name: str = "fallback-agri-advisory"
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
-        """Allow tool binding for LangGraph react agent compatibility."""
+        """
+        Allow tool binding for LangGraph react agent compatibility.
+        In fallback mode, tools are accepted gracefully without failing.
+        """
         return self.bind(tools=tools, **kwargs)
 
     def _generate(
@@ -35,9 +43,13 @@ class FallbackAgriChatModel(BaseChatModel):
         run_manager: Optional[Any] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        """
+        Generates a smart rule-based agronomic response when no cloud AI is connected.
+        """
         last_msg = messages[-1].content if messages else ""
         lower = str(last_msg).lower()
         
+        # Default comprehensive advisory
         reply = (
             "🌾 **Farming Advisory Assessment**\n\n"
             "I have analyzed your crop query against our agronomy knowledge base and current weather conditions:\n\n"
@@ -48,6 +60,7 @@ class FallbackAgriChatModel(BaseChatModel):
             "Source: crop_calendar_and_sowing.md, irrigation_management_guide.md"
         )
         
+        # Contextual response for irrigation queries
         if "irrigation" in lower or "water" in lower:
             reply = (
                 "💧 **Irrigation Advisory:**\n\n"
@@ -57,6 +70,7 @@ class FallbackAgriChatModel(BaseChatModel):
                 "*(Generated with local farming heuristics. Connect your NVIDIA API key for dynamic real-time reasoning.)*\n\n"
                 "Source: irrigation_management_guide.md"
             )
+        # Contextual response for pesticide / spray queries
         elif "spray" in lower or "pesticide" in lower or "fungicide" in lower:
             reply = (
                 "🚜 **Spray Window Advisory:**\n\n"
@@ -65,6 +79,7 @@ class FallbackAgriChatModel(BaseChatModel):
                 "3. **Rule:** Never spray when temperatures exceed 28°C or in midday sunlight to prevent crop phytotoxicity.\n\n"
                 "Source: pest_and_fungal_disease_guide.md"
             )
+        # Contextual response for disease or pest issues
         elif "disease" in lower or "blight" in lower or "fungus" in lower or "rot" in lower or "pest" in lower:
             reply = (
                 "🔬 **Pest & Disease Advisory:**\n\n"
@@ -84,6 +99,9 @@ class FallbackAgriChatModel(BaseChatModel):
         run_manager: Optional[Any] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
+        """
+        Streams words one-by-one to emulate live token streaming in the UI.
+        """
         result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         content = result.generations[0].text
         words = content.split(" ")
@@ -95,8 +113,18 @@ class FallbackAgriChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "fallback-agri-chat"
 
+
+# ==============================================================================
+# CONFIGURATION & HEALTH VALIDATION
+# ==============================================================================
 def validate_nvidia_config() -> dict:
-    """Validate NVIDIA API configuration, test tool binding, and report status."""
+    """
+    Validates whether the NVIDIA API key is properly set and checks whether
+    the model can accept tool bindings for the LangGraph agent.
+    
+    Returns:
+        dict: Status information ('configured', 'warning', or 'error') and descriptive message.
+    """
     key = settings.NVIDIA_API_KEY
     if not key or key.startswith("nvapi-your-key"):
         msg = "NVIDIA_API_KEY is not configured in .env. Running in Fallback/Diagnostic mode."
@@ -116,7 +144,7 @@ def validate_nvidia_config() -> dict:
             temperature=0.2
         )
         
-        # Test tool binding validation
+        # Test tool binding with a dummy validation tool
         from langchain_core.tools import tool
         @tool
         def _dummy_validation_tool(query: str) -> str:
@@ -151,24 +179,16 @@ def validate_nvidia_config() -> dict:
             "active_mode": "fallback_heuristic"
         }
 
-def get_chat_llm() -> BaseChatModel:
-    """Return configured ChatNVIDIA model or fallback model."""
-    key = settings.NVIDIA_API_KEY
-    if key and not key.startswith("nvapi-your-key"):
-        try:
-            return ChatNVIDIA(
-                model=settings.NVIDIA_CHAT_MODEL,
-                api_key=key,
-                base_url=settings.NVIDIA_BASE_URL,
-                temperature=0.2
-            )
-        except Exception as e:
-            logger.warning("Error instantiating ChatNVIDIA, using fallback: %s", e)
-            return FallbackAgriChatModel()
-    return FallbackAgriChatModel()
 
+# ==============================================================================
+# LLM INSTANCE FACTORY
+# ==============================================================================
 def get_chat_llm() -> BaseChatModel:
-    """Return configured ChatNVIDIA model or fallback model."""
+    """
+    Factory function returning the active Chat LLM.
+    - If NVIDIA_API_KEY is set: returns `ChatNVIDIA` powered by Meta LLaMA 3.3 70B.
+    - If missing or connection fails: returns `FallbackAgriChatModel`.
+    """
     key = settings.NVIDIA_API_KEY
     if key and not key.startswith("nvapi-your-key"):
         try:
