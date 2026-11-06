@@ -1,3 +1,16 @@
+// ==============================================================================
+// AgriPulse: Global State Store (Zustand)
+// ==============================================================================
+// WHAT THIS FILE DOES:
+// 1. Manages global application state (farm profile, live weather, chat messages).
+// 2. Provides actions to load data from the backend and update React components.
+// 3. Handles conversation switching, new chats, and real-time streaming updates.
+//
+// BEGINNER TIP: "Zustand" is a lightweight state manager for React.
+// Instead of passing state down through 10 components with props ("prop drilling"),
+// any component can directly import `useFarmStore` to read data or trigger actions.
+// ==============================================================================
+
 import { create } from 'zustand';
 import type {
   FarmProfile,
@@ -16,17 +29,22 @@ import {
   streamChat
 } from '../api/client';
 
+/**
+ * Interface defining all state variables and action functions
+ * available in the store.
+ */
 interface FarmState {
-  profile: FarmProfile | null;
-  weather: WeatherData | null;
-  threads: ThreadItem[];
-  activeThreadId: string | null;
-  messages: ChatMessage[];
-  isStreaming: boolean;
-  activeTools: ToolExecution[];
-  errorMessage: string | null;
+  // State variables
+  profile: FarmProfile | null;         // Current farmer profile (soil, crops, coordinates)
+  weather: WeatherData | null;         // Live weather metrics and forecast
+  threads: ThreadItem[];               // List of past conversation threads
+  activeThreadId: string | null;       // ID of currently opened chat session
+  messages: ChatMessage[];             // Messages in the active conversation
+  isStreaming: boolean;                // True while the AI is actively generating tokens
+  activeTools: ToolExecution[];        // Tools currently executing (shown as pill chips)
+  errorMessage: string | null;         // Global error alert banner message
 
-  // Actions
+  // Actions (methods that update the state)
   loadProfile: () => Promise<void>;
   saveProfile: (data: Partial<FarmProfile>) => Promise<void>;
   loadWeather: (params?: { lat?: number; lon?: number; place_name?: string }) => Promise<void>;
@@ -39,6 +57,7 @@ interface FarmState {
 }
 
 export const useFarmStore = create<FarmState>((set, get) => ({
+  // Initial state values
   profile: null,
   weather: null,
   threads: [],
@@ -48,182 +67,215 @@ export const useFarmStore = create<FarmState>((set, get) => ({
   activeTools: [],
   errorMessage: null,
 
-  clearError: () => set({ errorMessage: null }),
-
+  /**
+   * Loads the farmer's registered profile from the backend.
+   */
   loadProfile: async () => {
     try {
-      const prof = await fetchProfile();
-      set({ profile: prof });
-      // If weather is not loaded yet, load weather for profile location
-      if (!get().weather && prof.latitude && prof.longitude) {
-        get().loadWeather({ lat: prof.latitude, lon: prof.longitude });
-      }
+      const profile = await fetchProfile();
+      set({ profile });
     } catch (err: unknown) {
-      console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: `Failed to load profile: ${msg}` });
     }
   },
 
+  /**
+   * Saves profile modifications (e.g. soil texture, crops) to the backend.
+   */
   saveProfile: async (data: Partial<FarmProfile>) => {
     try {
       const updated = await updateProfile(data);
       set({ profile: updated });
-      if (updated.latitude && updated.longitude) {
-        await get().loadWeather({ lat: updated.latitude, lon: updated.longitude });
-      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       set({ errorMessage: `Failed to save profile: ${msg}` });
-      throw err;
     }
   },
 
+  /**
+   * Fetches weather forecast data for coordinates or a specific place name.
+   */
   loadWeather: async (params) => {
     try {
-      const data = await fetchWeather(params);
-      set({ weather: data });
+      const weather = await fetchWeather(params);
+      set({ weather });
     } catch (err: unknown) {
-      console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: `Failed to load weather: ${msg}` });
     }
   },
 
+  /**
+   * Loads the list of past conversation threads for the sidebar.
+   */
   loadThreads: async () => {
     try {
       const threads = await fetchThreads();
       set({ threads });
     } catch (err: unknown) {
-      console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: `Failed to load chat history: ${msg}` });
     }
   },
 
+  /**
+   * Switches the active conversation to the selected thread and loads its messages.
+   */
   selectThread: async (threadId: string) => {
     try {
       set({ activeThreadId: threadId, isStreaming: false, activeTools: [] });
-      const msgs = await fetchThreadMessages(threadId);
-      set({ messages: msgs });
+      const messages = await fetchThreadMessages(threadId);
+      set({ messages });
     } catch (err: unknown) {
-      console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: `Failed to load messages: ${msg}` });
     }
   },
 
+  /**
+   * Resets active conversation to start a blank chat session.
+   */
   startNewThread: () => {
     set({
       activeThreadId: null,
       messages: [],
-      isStreaming: false,
       activeTools: [],
+      isStreaming: false,
+      errorMessage: null,
     });
   },
 
+  /**
+   * Deletes a conversation thread and clears the screen if it was currently open.
+   */
   deleteThreadItem: async (threadId: string) => {
     try {
       await deleteThread(threadId);
-      const remaining = get().threads.filter((t) => t.thread_id !== threadId);
-      set({ threads: remaining });
+      const threads = get().threads.filter((t) => t.thread_id !== threadId);
+      set({ threads });
       if (get().activeThreadId === threadId) {
         get().startNewThread();
       }
     } catch (err: unknown) {
-      console.error(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: `Failed to delete thread: ${msg}` });
     }
   },
 
+  /**
+   * Submits a farmer message, creates a user bubble, and streams the AI's response.
+   */
   sendMessage: async (content: string, overrideLocation?: string) => {
     const trimmed = content.trim();
     if (!trimmed || get().isStreaming) return;
 
-    const threadId = get().activeThreadId || undefined;
+    // 1. Immediately append user's message to the UI
     const userMsg: ChatMessage = {
       role: 'user',
       content: trimmed,
-      created_at: new Date().toISOString(),
+      timestamp: new Date().toISOString(),
     };
 
-    // Prepend user message and initialize empty assistant message for streaming
-    const currentMessages = [...get().messages, userMsg];
-    const assistantIndex = currentMessages.length;
-    currentMessages.push({
+    // 2. Prepare an empty assistant placeholder message to receive streaming tokens
+    const assistantPlaceholder: ChatMessage = {
       role: 'assistant',
       content: '',
       sources: [],
-      tool_calls: [],
-      created_at: new Date().toISOString(),
-    });
+      timestamp: new Date().toISOString(),
+    };
 
-    set({
-      messages: currentMessages,
+    set((state) => ({
+      messages: [...state.messages, userMsg, assistantPlaceholder],
       isStreaming: true,
       activeTools: [],
       errorMessage: null,
-    });
+    }));
 
-    let accumulatedText = '';
-    const collectedTools: ToolExecution[] = [];
+    const currentThreadId = get().activeThreadId || undefined;
 
+    // 3. Stream response tokens and tool execution events from backend
     await streamChat(
       {
         message: trimmed,
-        thread_id: threadId,
+        thread_id: currentThreadId,
         override_location: overrideLocation,
       },
       {
-        onToken: (token) => {
-          accumulatedText += token;
+        // On each word/token received from the AI model
+        onToken: (token: string) => {
           set((state) => {
-            const updated = [...state.messages];
-            if (updated[assistantIndex]) {
-              updated[assistantIndex] = {
-                ...updated[assistantIndex],
-                content: accumulatedText,
+            const msgs = [...state.messages];
+            const lastIdx = msgs.length - 1;
+            if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
+              msgs[lastIdx] = {
+                ...msgs[lastIdx],
+                content: msgs[lastIdx].content + token,
               };
             }
-            return { messages: updated };
+            return { messages: msgs };
           });
         },
-        onToolStart: (tool, label, input) => {
-          const entry: ToolExecution = {
-            tool,
-            label: label || `Running ${tool}...`,
-            status: 'running',
-            input,
-          };
-          collectedTools.push(entry);
-          set({ activeTools: [...collectedTools] });
+
+        // When the agent begins calling a tool (e.g. "Fetching 7-day forecast...")
+        onToolStart: (tool: string, label?: string, input?: Record<string, unknown>) => {
+          set((state) => ({
+            activeTools: [
+              ...state.activeTools.filter((t) => t.tool !== tool),
+              {
+                tool,
+                label: label || `Running ${tool}...`,
+                status: 'running',
+                input,
+              },
+            ],
+          }));
         },
-        onToolEnd: (tool) => {
-          const idx = collectedTools.findIndex((t) => t.tool === tool && t.status === 'running');
-          if (idx !== -1) {
-            collectedTools[idx].status = 'completed';
-          }
-          set({ activeTools: [...collectedTools] });
+
+        // When the tool finishes executing
+        onToolEnd: (tool: string) => {
+          set((state) => ({
+            activeTools: state.activeTools.map((t) =>
+              t.tool === tool ? { ...t, status: 'completed' } : t
+            ),
+          }));
         },
+
+        // When the full message generation is complete
         onDone: (data) => {
           set((state) => {
-            const updated = [...state.messages];
-            if (updated[assistantIndex]) {
-              updated[assistantIndex] = {
-                ...updated[assistantIndex],
-                content: data.response || accumulatedText,
+            const msgs = [...state.messages];
+            const lastIdx = msgs.length - 1;
+            if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
+              msgs[lastIdx] = {
+                ...msgs[lastIdx],
+                content: data.response || msgs[lastIdx].content,
                 sources: data.sources || [],
-                tool_calls: collectedTools,
               };
             }
             return {
-              messages: updated,
+              messages: msgs,
               activeThreadId: data.thread_id,
               isStreaming: false,
-              activeTools: [],
             };
           });
+          // Refresh thread list so new conversations appear in the sidebar
           get().loadThreads();
         },
-        onError: (err) => {
+
+        // On network error or backend failure
+        onError: (err: string) => {
           set({
             isStreaming: false,
             errorMessage: err,
-            activeTools: [],
           });
         },
       }
     );
   },
+
+  /**
+   * Dismisses the error banner.
+   */
+  clearError: () => set({ errorMessage: null }),
 }));

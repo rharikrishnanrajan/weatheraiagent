@@ -1,3 +1,14 @@
+// ==============================================================================
+// AgriPulse: Weather Dashboard Page Component
+// ==============================================================================
+// WHAT THIS FILE DOES:
+// 1. Renders the live weather dashboard (current temperature, wind, humidity, rain).
+// 2. Displays active agricultural hazard alerts (frost warnings, heatwaves, gales).
+// 3. Embeds an interactive temperature and precipitation chart for the next 48 hours.
+// 4. Shows a 7-day agronomic forecast cards with evapotranspiration (ET0) and rain odds.
+// 5. Provides a search box to look up weather for any city or region worldwide.
+// ==============================================================================
+
 import { useState, useEffect } from 'react';
 import {
   Search,
@@ -15,16 +26,21 @@ import { WeatherAlertBanner } from '../components/WeatherAlertBanner';
 import { TempPrecipChart } from '../components/TempPrecipChart';
 
 export const WeatherPage = () => {
+  // Access weather data and actions from the Zustand store
   const { weather, loadWeather, profile } = useFarmStore();
   const [searchLocation, setSearchLocation] = useState('');
   const [isSearching, setIsSearching] = useState(false);
 
+  // Load default weather on first visit if not already loaded
   useEffect(() => {
     if (!weather) {
       loadWeather();
     }
   }, [weather, loadWeather]);
 
+  /**
+   * Search weather for a custom location entered by the user.
+   */
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchLocation.trim()) return;
@@ -33,6 +49,9 @@ export const WeatherPage = () => {
     setIsSearching(false);
   };
 
+  /**
+   * Reset the dashboard to the coordinates in the farmer's profile.
+   */
   const handleResetToProfile = async () => {
     if (profile?.latitude && profile?.longitude) {
       setSearchLocation('');
@@ -40,6 +59,7 @@ export const WeatherPage = () => {
     }
   };
 
+  // Display loading spinner while data is being fetched
   if (!weather) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-16 text-center text-stone-500">
@@ -49,142 +69,152 @@ export const WeatherPage = () => {
     );
   }
 
-  const { current, location, daily, alerts } = weather;
-  const total7DayRain = daily.reduce((acc, d) => acc + d.precipitation_sum, 0);
-  const avgMaxTemp = daily.reduce((acc, d) => acc + d.temperature_2m_max, 0) / (daily.length || 1);
+  const { current, daily, hourly, alerts, location } = weather;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      {/* Header & Location Search */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+      {/* ---------------------------------------------------------------------- */}
+      {/* HEADER BAR: Location Title & Search Field                              */}
+      {/* ---------------------------------------------------------------------- */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-xl border border-stone-200 shadow-sm">
         <div>
-          <div className="flex items-center space-x-2 text-farm-700 font-semibold text-xs tracking-wider uppercase mb-1">
-            <CloudSun className="w-4 h-4" />
-            <span>Open-Meteo Precision Agro-Forecast</span>
+          <div className="flex items-center gap-2 text-stone-500 text-xs font-semibold uppercase tracking-wider mb-1">
+            <MapPin className="w-3.5 h-3.5 text-farm-600" />
+            <span>Active Forecast Location</span>
           </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-stone-900 flex items-center space-x-2">
-            <span>{location.name}</span>
-            <span className="text-sm font-normal text-stone-500 hidden sm:inline">
-              ({location.latitude.toFixed(2)}°N, {location.longitude.toFixed(2)}°W)
-            </span>
-          </h1>
+          <h1 className="text-xl font-bold text-stone-900">{location.name}</h1>
+          <p className="text-xs text-stone-500">
+            Coordinates: {location.latitude.toFixed(4)}°N, {location.longitude.toFixed(4)}°E •
+            Elevation: {location.elevation}m
+          </p>
         </div>
 
-        {/* Search Bar */}
-        <div className="flex items-center space-x-2">
-          <form onSubmit={handleSearch} className="relative flex-1 sm:w-80">
+        {/* Location Search Form */}
+        <form onSubmit={handleSearch} className="flex gap-2">
+          <div className="relative">
+            <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search town, city or region..."
+              placeholder="Search another city/location..."
               value={searchLocation}
               onChange={(e) => setSearchLocation(e.target.value)}
-              disabled={isSearching}
-              className="w-full pl-9 pr-16 py-2.5 rounded-xl border border-stone-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-farm-500 shadow-xs disabled:opacity-60"
+              className="text-xs pl-9 pr-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-farm-600 w-64"
             />
-            <Search className="w-4 h-4 text-stone-400 absolute left-3 top-3.5" />
-            <button
-              type="submit"
-              disabled={isSearching || !searchLocation.trim()}
-              className="absolute right-1.5 top-1.5 px-2.5 py-1.5 rounded-lg bg-farm-600 hover:bg-farm-700 disabled:bg-stone-300 text-white text-xs font-semibold transition-colors"
-            >
-              {isSearching ? '...' : 'Find'}
-            </button>
-          </form>
+          </div>
+          <button
+            type="submit"
+            disabled={isSearching}
+            className="px-3 py-2 bg-farm-600 hover:bg-farm-700 text-white text-xs font-medium rounded-lg transition-colors"
+          >
+            {isSearching ? 'Searching...' : 'Search'}
+          </button>
           {profile && (
             <button
+              type="button"
               onClick={handleResetToProfile}
-              className="px-3 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold border border-stone-200 transition-colors flex items-center space-x-1.5"
-              title="Reset to your farm profile location"
+              className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium rounded-lg transition-colors"
+              title="Reset to your saved farm profile location"
             >
-              <MapPin className="w-3.5 h-3.5 text-farm-600" />
-              <span className="hidden sm:inline">Farm</span>
+              Reset to Farm
             </button>
           )}
-        </div>
+        </form>
       </div>
 
-      {/* Weather Hazard Alerts Banner */}
-      <WeatherAlertBanner alerts={alerts} />
+      {/* ---------------------------------------------------------------------- */}
+      {/* SEVERE WEATHER HAZARD ALERTS                                           */}
+      {/* ---------------------------------------------------------------------- */}
+      {alerts && alerts.length > 0 && (
+        <div className="space-y-3">
+          {alerts.map((alert, idx) => (
+            <WeatherAlertBanner key={idx} alert={alert} />
+          ))}
+        </div>
+      )}
 
-      {/* Top Overview Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Current Temperature */}
-        <div className="p-5 rounded-2xl bg-white border border-stone-200 shadow-xs flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
+      {/* ---------------------------------------------------------------------- */}
+      {/* CURRENT CONDITIONS METRIC CARDS                                        */}
+      {/* ---------------------------------------------------------------------- */}
+      <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-4 gap-4">
+        {/* Temperature */}
+        <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
+          <div className="p-3 rounded-lg bg-amber-50 text-amber-600">
             <Thermometer className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs font-semibold text-stone-500 uppercase">Current Temp</div>
-            <div className="text-2xl font-black text-stone-900">
-              {Math.round(current.temperature_2m)}°C
-            </div>
-            <div className="text-xs text-stone-500">
-              Feels like {Math.round(current.apparent_temperature)}°C • {current.weather_description}
+            <div className="text-xs text-stone-500 font-medium">Temperature</div>
+            <div className="text-xl font-bold text-stone-900">{current.temperature_2m}°C</div>
+            <div className="text-[11px] text-stone-400">
+              Feels like {current.apparent_temperature}°C
             </div>
           </div>
         </div>
 
-        {/* Humidity & Dew Point */}
-        <div className="p-5 rounded-2xl bg-white border border-stone-200 shadow-xs flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+        {/* Relative Humidity */}
+        <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
+          <div className="p-3 rounded-lg bg-blue-50 text-blue-600">
             <Droplets className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs font-semibold text-stone-500 uppercase">Relative Humidity</div>
-            <div className="text-2xl font-black text-stone-900">
-              {Math.round(current.relative_humidity_2m)}%
-            </div>
-            <div className="text-xs text-stone-500">
-              {current.relative_humidity_2m > 80 ? 'Foliar disease watch' : 'Standard transpiration'}
+            <div className="text-xs text-stone-500 font-medium">Relative Humidity</div>
+            <div className="text-xl font-bold text-stone-900">{current.relative_humidity_2m}%</div>
+            <div className="text-[11px] text-stone-400">
+              {current.relative_humidity_2m > 80 ? 'High disease pressure' : 'Normal range'}
             </div>
           </div>
         </div>
 
         {/* Wind Speed */}
-        <div className="p-5 rounded-2xl bg-white border border-stone-200 shadow-xs flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center">
+        <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
+          <div className="p-3 rounded-lg bg-teal-50 text-teal-600">
             <Wind className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs font-semibold text-stone-500 uppercase">Wind Velocity</div>
-            <div className="text-2xl font-black text-stone-900">
-              {Math.round(current.wind_speed_10m)} km/h
-            </div>
-            <div className="text-xs text-stone-500">
-              Gusts up to {Math.round(current.wind_gusts_10m)} km/h
-            </div>
+            <div className="text-xs text-stone-500 font-medium">Wind Speed</div>
+            <div className="text-xl font-bold text-stone-900">{current.wind_speed_10m} km/h</div>
+            <div className="text-[11px] text-stone-400">Gusts: {current.wind_gusts_10m} km/h</div>
           </div>
         </div>
 
-        {/* 7-Day Cumulative Rain */}
-        <div className="p-5 rounded-2xl bg-white border border-stone-200 shadow-xs flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center">
+        {/* Current Precipitation */}
+        <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-sm flex items-center gap-3">
+          <div className="p-3 rounded-lg bg-sky-50 text-sky-600">
             <Gauge className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs font-semibold text-stone-500 uppercase">7-Day Rain Sum</div>
-            <div className="text-2xl font-black text-stone-900">
-              {total7DayRain.toFixed(1)} mm
-            </div>
-            <div className="text-xs text-stone-500">
-              Avg High: {Math.round(avgMaxTemp)}°C
-            </div>
+            <div className="text-xs text-stone-500 font-medium">Precipitation</div>
+            <div className="text-xl font-bold text-stone-900">{current.precipitation} mm</div>
+            <div className="text-[11px] text-stone-400">{current.weather_description}</div>
           </div>
         </div>
       </div>
 
-      {/* Interactive Recharts Graph */}
-      <TempPrecipChart daily={daily} />
-
-      {/* 7-Day Daily Forecast Cards */}
-      <div>
-        <div className="flex items-center space-x-2 mb-4">
-          <Calendar className="w-5 h-5 text-farm-600" />
-          <h2 className="text-lg font-bold text-stone-900">7-Day Agronomic Daily Forecast</h2>
+      {/* ---------------------------------------------------------------------- */}
+      {/* 48-HOUR HOURLY TEMPERATURE & PRECIPITATION CHART                       */}
+      {/* ---------------------------------------------------------------------- */}
+      {hourly && hourly.length > 0 && (
+        <div className="bg-white p-4 md:p-6 rounded-xl border border-stone-200 shadow-sm">
+          <div className="flex items-center gap-2 mb-4">
+            <CloudSun className="w-5 h-5 text-farm-600" />
+            <h2 className="text-base font-bold text-stone-900">
+              Next 48-Hour Temperature & Rainfall Forecast
+            </h2>
+          </div>
+          <TempPrecipChart hourlyData={hourly} />
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
-          {daily.map((item, idx) => (
-            <WeatherCard key={item.date} item={item} isToday={idx === 0} />
+      )}
+
+      {/* ---------------------------------------------------------------------- */}
+      {/* 7-DAY DAILY AGRONOMIC FORECAST CARDS                                   */}
+      {/* ---------------------------------------------------------------------- */}
+      <div className="bg-white p-4 md:p-6 rounded-xl border border-stone-200 shadow-sm">
+        <div className="flex items-center gap-2 mb-4">
+          <Calendar className="w-5 h-5 text-farm-600" />
+          <h2 className="text-base font-bold text-stone-900">7-Day Agronomic Forecast</h2>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+          {daily.map((day, idx) => (
+            <WeatherCard key={idx} day={day} />
           ))}
         </div>
       </div>
